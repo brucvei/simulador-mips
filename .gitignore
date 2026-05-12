@@ -1,0 +1,38 @@
+# CLion / JetBrains
+.idea/
+*.iml
+
+# Build do CMake / CLion
+cmake-build-*/
+build/
+out/
+debug/
+release/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# Saídas comuns de montagem/compilação
+*.o
+*.obj
+*.exe
+*.out
+*.elf
+*.map
+*.lst
+*.sym
+
+# Arquivos temporários e backups
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Arquivos do sistema operacional
+.DS_Store
+Thumbs.db
+

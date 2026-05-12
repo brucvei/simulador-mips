@@ -1,0 +1,19 @@
+1. Crie as variáveis para a simulação do processador MIPS.
+	(a) Memória. Serão simulados 3 segmentos de memória com um tamanho inicial de 4096 bytes. Cada segmento será simulado como um vetor de inteiros (32 bits).
+		i. Segmento de texto.
+		ii. Segmento de dados.
+		iii. Segmento da pilha.
+	(b) Banco de Registradores de uso geral. Serão simulados 32 registradores de uso geral como um vetor de inteiros (32 bits)
+	(c) Registradores de uso interno: PC e IR. Estes dois registradores são simulados como variáveis inteiras de 32 bits.
+	(d) Campos das instruções. Cada campo pode ser simulado como uma variável do tipo inteiro (32 bits).
+2. Escreva um procedimento para verificar se um endereço pertence a um dos segmentos de memória simulado.
+3. Escreva um procedimento para escrever no segmento de memória simulado.
+4. Escreva um procedimento para ler do segmento de memória simulado.
+5. Escreva um procedimento para ler os bytes de um arquivo e armazenar em um dos segmentos de memória simulado.
+	(a) Use este procedimento para ler o arquivo com as instruções em linguagem de máquina (arquivo com extensão .bin) e armazenar em um segmento de texto na memória simulada.
+	(b) Use este procedimento para ler o arquivo com aos dados do programa (arquivo com extensão .dat) e armazenar em um segmento de dados na memória simulada.
+6. No procedimento principal o programa deve excutar os seguintes passos até encontrar uma instrução de chamada ao sistema para os serviços de encerramento do programa:
+	(a) Buscar a instrução apontada por PC e armazenar no registrador IR.
+	(b) Separar os campos da instrução em IR, incrementar o registrador PC (somar 4) e decodificar a instrução.
+	(c) Executar a instrução usando os campos OPCODE e FUNCT, se a instrução é tipo R.
+7. Escrever um relatório com a documentação do programa. Enviar o relatório e o código fonte via Moodle para a avaliação.
