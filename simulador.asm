@@ -13,12 +13,21 @@ stack_seg:     .space MEM_SIZE_BYTES
 reg_file:      .space 128
 
 # Registradores internos
-pc:            .word 0
+pc:            .word 0x00400000
 ir:            .word 0
-opcode_store:  .word 0
 ciclos:        .word 0        # contador de ciclos
 text_size:     .word 0        # tamanho (em bytes) do arquivo carregado em text_seg
 primeiro_arquivo: .word 1     # flag: 1 = é o primeiro arquivo (text), 0 = é o segundo (data)
+
+# Variáveis para campos da instrução corrente (adicionadas conforme especificação)
+campo_opcode:  .word 0
+campo_rs:      .word 0
+campo_rt:      .word 0
+campo_rd:      .word 0
+campo_shamt:   .word 0
+campo_funct:   .word 0
+campo_imm:     .word 0
+campo_addr:    .word 0
 
 # Buffer temporário para leitura de arquivo
 temp_buffer:    .space 1024
@@ -116,12 +125,22 @@ main:
 	syscall
 
 main_loop:
-	# Verificar se PC chegou ao final do arquivo
+    # Verificar limite de ciclos (proteção contra loop infinito)
+	la $t0, ciclos
+	lw $t1, 0($t0)
+	li $t2, 10000
+	bge $t1, $t2, exit_simulator
+
+	# Verificar limite usando offset relativo ao text_seg
+	# offset = PC - 0x00400000
 	la $t0, pc
-	lw $t1, 0($t0)           # $t1 = PC atual
-	la $t2, text_size
-	lw $t3, 0($t2)           # $t3 = tamanho do arquivo
-	bge $t1, $t3, exit_simulator  # Se PC >= tamanho, sair
+	lw $t1, 0($t0)
+	lui $t2, 0x0040            # base text = 0x00400000
+	subu $t3, $t1, $t2         # offset = PC - 0x00400000
+	la $t4, text_size
+	lw $t5, 0($t4)
+	bge $t3, $t5, exit_simulator
+
 
 	# Incrementar contador de ciclos
 	la $t0, ciclos
@@ -186,8 +205,16 @@ zerar_regs_loop:
 	addi $t2, $t2, 1
 	j zerar_regs_loop
 zerar_regs_done:
-	la $t0, pc
-	sw $zero, 0($t0)
+	# PC = 0x00400000 (endereço absoluto do segmento de texto)
+	lui $t0, 0x0040
+	la $t1, pc
+	sw $t0, 0($t1)
+
+    # Inicializar $sp simulado = 0x7FFFEFFC
+	lui $t0, 0x7FFF
+	ori $t0, $t0, 0xEFFC
+	la $t1, reg_file
+	sw $t0, 116($t1)         # reg[29] × 4 = 116
 
 	lw $ra, 0($sp)
 	addiu $sp, $sp, 4
@@ -225,16 +252,47 @@ ler_loop:
 	la $t1, temp_buffer
 	move $t2, $s0          # destino atual
 copiar_loop:
+	li $t3, 4
+	blt $t0, $t3, copiar_resto
+
+	# Lê 4 bytes na ordem little-endian
+	lb $t3, 0($t1)             # B0 (byte menos significativo)
+	lb $t4, 1($t1)             # B1
+	lb $t5, 2($t1)             # B2
+	lb $t6, 3($t1)             # B3 (byte mais significativo)
+
+	# Monta a word em big-endian: B3<<24 | B2<<16 | B1<<8 | B0
+	andi $t3, $t3, 0xFF
+	andi $t4, $t4, 0xFF
+	andi $t5, $t5, 0xFF
+	andi $t6, $t6, 0xFF
+
+	sll $t6, $t6, 24
+	sll $t5, $t5, 16
+	sll $t4, $t4, 8
+	or  $t6, $t6, $t5
+	or  $t6, $t6, $t4
+	or  $t6, $t6, $t3          # $t6 = word reordenada
+
+	sw  $t6, 0($t2)            # escreve word no destino
+
+	addi $t1, $t1, 4
+	addi $t2, $t2, 4
+	addi $t0, $t0, -4
+	j copiar_loop
+
+copiar_resto:
+	# copia bytes restantes (< 4) sem inversão
 	beq $t0, $zero, atualiza_destino
 	lb $t3, 0($t1)
 	sb $t3, 0($t2)
 	addi $t1, $t1, 1
 	addi $t2, $t2, 1
 	addi $t0, $t0, -1
-	j copiar_loop
+	j copiar_resto
 
 atualiza_destino:
-	move $s0, $t2          # atualiza s0 para próxima cópia
+	move $s0, $t2
 	j ler_loop
 
 fechar_arquivo:
@@ -242,17 +300,13 @@ fechar_arquivo:
 	li $v0, 16
 	syscall
 
-	# Calcular e salvar tamanho = $s0 - $s2
-	# MAS APENAS para o primeiro arquivo (text)
 	subu $t0, $s0, $s2
 	la $t1, primeiro_arquivo
 	lw $t2, 0($t1)
-	beqz $t2, carregar_sem_salvar  # Se não é o primeiro arquivo, não salva
+	beqz $t2, carregar_sem_salvar
 
 	la $t1, text_size
 	sw $t0, 0($t1)
-
-	# Marcar que já carregou o primeiro arquivo
 	la $t1, primeiro_arquivo
 	sw $zero, 0($t1)
 
@@ -263,8 +317,6 @@ erro_arquivo:
 	li $v0, 4
 	la $a0, msg_erro_arquivo
 	syscall
-	# Não salvar tamanho se erro
-	# Marcar que carregou mesmo assim
 	la $t1, primeiro_arquivo
 	sw $zero, 0($t1)
 
@@ -356,12 +408,15 @@ fetch:
 
 	la $t0, pc
 	lw $t1, 0($t0)
-	la $t2, text_seg
-	addu $t2, $t2, $t1
-	lw $t3, 0($t2)
-	la $t4, ir
-	sw $t3, 0($t4)
+	lui $t2, 0x0040
+	subu $t2, $t1, $t2          # offset relativo
+	la $t3, text_seg
+	addu $t3, $t3, $t2          # endereço real no MARS
+	lw $t4, 0($t3)
+	la $t5, ir
+	sw $t4, 0($t5)
 
+	# Incrementa PC em 4
 	addi $t1, $t1, 4
 	sw $t1, 0($t0)
 
@@ -375,9 +430,52 @@ decode:
 
 	la $t0, ir
 	lw $t1, 0($t0)
-	srl $t1, $t1, 26
-	la $t0, opcode_store
-	sw $t1, 0($t0)
+
+	# opcode = bits 31-26
+	srl $t2, $t1, 26
+	la $t0, campo_opcode
+	sw $t2, 0($t0)
+
+	# rs = bits 25-21
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+	la $t0, campo_rs
+	sw $t2, 0($t0)
+
+	# rt = bits 20-16
+	srl $t2, $t1, 16
+	andi $t2, $t2, 0x1F
+	la $t0, campo_rt
+	sw $t2, 0($t0)
+
+	# rd = bits 15-11
+	srl $t2, $t1, 11
+	andi $t2, $t2, 0x1F
+	la $t0, campo_rd
+	sw $t2, 0($t0)
+
+	# shamt = bits 10-6
+	srl $t2, $t1, 6
+	andi $t2, $t2, 0x1F
+	la $t0, campo_shamt
+	sw $t2, 0($t0)
+
+	# funct = bits 5-0
+	andi $t2, $t1, 0x3F
+	la $t0, campo_funct
+	sw $t2, 0($t0)
+
+	# immediate = bits 15-0 (com extensão de sinal)
+	andi $t2, $t1, 0xFFFF
+	sll $t2, $t2, 16
+	sra $t2, $t2, 16
+	la $t0, campo_imm
+	sw $t2, 0($t0)
+
+	# address = bits 25-0 (J-type)
+	andi $t2, $t1, 0x03FFFFFF
+	la $t0, campo_addr
+	sw $t2, 0($t0)
 
 	lw $ra, 0($sp)
 	addiu $sp, $sp, 4
@@ -387,19 +485,41 @@ executar:
 	addiu $sp, $sp, -4
 	sw $ra, 0($sp)
 
-	la $t0, opcode_store
+	la $t0, campo_opcode
 	lw $t1, 0($t0)
 
-	# TODO: Implementar sub, and, or, andi, ori, bne, sll, srl e syscall, é bom adicionar mais mas enfim.
-	beq $t1, $zero, exec_add
+    # Tipo R
+	beq $t1, $zero, exec_tipo_r
+
+	# addi
 	li $t2, 8
 	beq $t1, $t2, exec_addi
+
+	# andi
+	li $t2, 12
+	beq $t1, $t2, exec_andi
+
+	# ori
+	li $t2, 13
+	beq $t1, $t2, exec_ori
+
+	# lw
 	li $t2, 35
 	beq $t1, $t2, exec_lw
+
+	# sw
 	li $t2, 43
 	beq $t1, $t2, exec_sw
+
+	# beq
 	li $t2, 4
 	beq $t1, $t2, exec_beq
+
+	# bne
+	li $t2, 5
+	beq $t1, $t2, exec_bne
+
+	# j
 	li $t2, 2
 	beq $t1, $t2, exec_j
 
@@ -409,58 +529,295 @@ executar:
 	syscall
 	j exec_done
 
+exec_tipo_r:
+	la $t0, ir
+	lw $t1, 0($t0)
+
+	andi $t2, $t1, 0x3F   # funct
+
+	# add
+	li $t3, 32
+	beq $t2, $t3, exec_add
+
+	# sub
+	li $t3, 34
+	beq $t2, $t3, exec_sub
+
+	# and
+	li $t3, 36
+	beq $t2, $t3, exec_and
+
+	# or
+	li $t3, 37
+	beq $t2, $t3, exec_or
+
+	# sll
+	li $t3, 0
+	beq $t2, $t3, exec_sll
+
+	# srl
+	li $t3, 2
+	beq $t2, $t3, exec_srl
+
+	# syscall
+	li $t3, 12
+	beq $t2, $t3, exec_syscall
+
+	j exec_done
+
 exec_add:
 	la $t0, ir
 	lw $t1, 0($t0)
-	andi $t2, $t1, 0x3F      # funct
 
-	li $t3, 12               # syscall
-	beq $t2, $t3, exec_exit
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F      # rs
 
-	li $t3, 32               # add
-	bne $t2, $t3, exec_done
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F      # rt
 
-	srl $t4, $t1, 21         # rs
-	andi $t4, $t4, 0x1F
-	srl $t5, $t1, 16         # rt
-	andi $t5, $t5, 0x1F
-	srl $t6, $t1, 11         # rd
-	andi $t6, $t6, 0x1F
+	srl $t4, $t1, 11
+	andi $t4, $t4, 0x1F      # rd
 
-	# --- Checkpoint: ADD ---
-	li $v0, 4
-	la $a0, msg_add
-	syscall
-	li $v0, 1
-	move $a0, $t6
-	syscall
-	li $v0, 4
-	la $a0, msg_equals
-	syscall
+	la $t5, reg_file
 
-	la $t7, reg_file
-	sll $t8, $t4, 2
-	addu $t8, $t7, $t8
-	lw $t9, 0($t8)
-	sll $t4, $t5, 2
-	addu $t4, $t7, $t4
-	lw $t5, 0($t4)
-	addu $t9, $t9, $t5
-	sll $t6, $t6, 2
-	addu $t6, $t7, $t6
-	sw $t9, 0($t6)
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)           # valor de reg[rs]
 
-	# Imprimir resultado
-	li $v0, 34
-	move $a0, $t9
-	syscall
-	li $v0, 4
-	la $a0, msg_fim_linha
-	syscall
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	lw $t8, 0($t6)           # valor de reg[rt]
+
+	addu $t9, $t7, $t8       # rd = rs + rt
+
+	beqz $t4, exec_done      # protege $zero: não escreve em reg[0]
+
+	sll $t6, $t4, 2
+	addu $t6, $t5, $t6
+	sw $t9, 0($t6)           # reg[rd] = resultado
+
 	j exec_done
 
-exec_exit:
-	# --- Checkpoint: SYSCALL ---
+exec_sub:
+	la $t0, ir
+	lw $t1, 0($t0)
+
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+
+	srl $t4, $t1, 11
+	andi $t4, $t4, 0x1F
+
+	la $t5, reg_file
+
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)
+
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	lw $t8, 0($t6)
+
+	subu $t9, $t7, $t8
+    
+	beqz $t4, exec_done 
+	sll $t6, $t4, 2
+	addu $t6, $t5, $t6
+	sw $t9, 0($t6)
+
+	j exec_done
+
+exec_and:
+	la $t0, ir
+	lw $t1, 0($t0)
+
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+
+	srl $t4, $t1, 11
+	andi $t4, $t4, 0x1F
+
+	la $t5, reg_file
+
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)
+
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	lw $t8, 0($t6)
+
+	and $t9, $t7, $t8
+    
+	beqz $t4, exec_done 
+	sll $t6, $t4, 2
+	addu $t6, $t5, $t6
+	sw $t9, 0($t6)
+
+	j exec_done
+
+exec_or:
+	la $t0, ir
+	lw $t1, 0($t0)
+
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+
+	srl $t4, $t1, 11
+	andi $t4, $t4, 0x1F
+
+	la $t5, reg_file
+
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)
+
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	lw $t8, 0($t6)
+
+	or $t9, $t7, $t8
+    
+	beqz $t4, exec_done 
+	sll $t6, $t4, 2
+	addu $t6, $t5, $t6
+	sw $t9, 0($t6)
+
+	j exec_done
+
+exec_sll:
+	la $t5, reg_file
+
+	la $t0, campo_rt
+	lw $t2, 0($t0)
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)           # reg[rt]
+
+	la $t0, campo_shamt
+	lw $t4, 0($t0)           # shamt (imediato de 5 bits)
+
+	# Executa shift: não podemos usar sll com registrador diretamente,
+	# então usamos sllv que aceita o shamt em registrador
+	sllv $t8, $t7, $t4
+
+	la $t0, campo_rd
+	lw $t3, 0($t0)
+	beqz $t3, exec_done
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	sw $t8, 0($t6)
+	j exec_done
+
+exec_srl:
+	la $t5, reg_file
+
+	la $t0, campo_rt
+	lw $t2, 0($t0)
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)
+
+	la $t0, campo_shamt
+	lw $t4, 0($t0)
+
+	srlv $t8, $t7, $t4
+
+	la $t0, campo_rd
+	lw $t3, 0($t0)
+	beqz $t3, exec_done
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	sw $t8, 0($t6)
+	j exec_done
+
+exec_andi:
+	la $t0, ir
+	lw $t1, 0($t0)
+
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+
+	andi $t4, $t1, 0xFFFF
+
+	la $t5, reg_file
+
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)
+
+	and $t8, $t7, $t4
+    
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+	beqz $t3, exec_done 
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	sw $t8, 0($t6)
+
+	j exec_done
+
+exec_ori:
+	la $t0, ir
+	lw $t1, 0($t0)
+
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+
+	andi $t4, $t1, 0xFFFF
+
+	la $t5, reg_file
+
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)
+
+	or $t8, $t7, $t4
+    
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+	beqz $t3, exec_done 
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	sw $t8, 0($t6)
+
+	j exec_done
+
+exec_syscall:
+	# Lê reg[2] ($v0 simulado) do reg_file
+	la $t0, reg_file
+	lw $t1, 8($t0)           # reg[2] * 4 = offset 8
+
+	# exit (código 1)
+	li $t2, 1
+	beq $t1, $t2, syscall_exit
+
+	# exit2 (código 10) — o mais comum em MIPS
+	li $t2, 10
+	beq $t1, $t2, syscall_exit
+
+	li $t2, 17
+	beq $t1, $t2, syscall_exit
+
+	# Serviço não implementado: ignora e continua
+	j exec_done
+
+syscall_exit:
 	li $v0, 4
 	la $a0, msg_syscall
 	syscall
@@ -494,17 +851,21 @@ exec_addi:
 	addu $t2, $t5, $t2
 	lw $t6, 0($t2)
 	addu $t6, $t6, $t4
-	sll $t3, $t3, 2
-	addu $t3, $t5, $t3
-	sw $t6, 0($t3)
-
-	# Imprimir resultado
+    
+    # Imprimir resultado
 	li $v0, 34
 	move $a0, $t6
 	syscall
 	li $v0, 4
 	la $a0, msg_fim_linha
 	syscall
+
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+	beqz $t3, exec_done 
+	sll $t3, $t3, 2
+	addu $t3, $t5, $t3
+	sw $t6, 0($t3)
 	j exec_done
 
 exec_lw:
@@ -516,7 +877,7 @@ exec_lw:
 	andi $t3, $t3, 0x1F     # rt
 	andi $t4, $t1, 0xFFFF
 	sll $t4, $t4, 16
-	sra $t4, $t4, 16
+	sra $t4, $t4, 16        # Immediate estendido com sinal
 
 	# --- Checkpoint: LW ---
 	li $v0, 4
@@ -532,18 +893,24 @@ exec_lw:
 	la $t5, reg_file
 	sll $t2, $t2, 2
 	addu $t2, $t5, $t2
-	lw $t6, 0($t2)
+	lw $t6, 0($t2)          # $t6 = valor de reg[rs]
+
+	# Converter endereço absoluto MIPS para offset relativo ao nosso data_seg interno
+	lui $t7, 0x1000        
+	subu $t6, $t6, $t7     
 
 	la $t7, data_seg
-	addu $t6, $t7, $t6
-	addu $t6, $t6, $t4
-	lw $t8, 0($t6)
+	addu $t6, $t7, $t6       # Endereço real no MARS = data_seg + offset_base
+	addu $t6, $t6, $t4       # Endereço final = Endereço real + Immediate (offset)
+	lw $t8, 0($t6)          # Lê a word da memória simulada
 
+	beqz $t3, lw_print      # Se rt == 0, não salva no registrador (protege $zero)
 	sll $t3, $t3, 2
 	addu $t3, $t5, $t3
-	sw $t8, 0($t3)
+	sw $t8, 0($t3)          # reg[rt] = valor lido da memória
 
-	# Imprimir resultado
+lw_print:
+	# Imprimir resultado lido
 	li $v0, 34
 	move $a0, $t8
 	syscall
@@ -561,7 +928,7 @@ exec_sw:
 	andi $t3, $t3, 0x1F     # rt
 	andi $t4, $t1, 0xFFFF
 	sll $t4, $t4, 16
-	sra $t4, $t4, 16
+	sra $t4, $t4, 16        # Immediate estendido com sinal
 
 	# --- Checkpoint: SW ---
 	li $v0, 4
@@ -575,18 +942,25 @@ exec_sw:
 	syscall
 
 	la $t5, reg_file
+	
+	# Pegar o valor que está dentro de reg[rt] para GUARDAR na memória
+	sll $t8, $t3, 2
+	addu $t8, $t5, $t8
+	lw $t8, 0($t8)          # $t8 = valor de reg[rt]
+
+	# Calcular endereço de destino na memória
 	sll $t2, $t2, 2
 	addu $t2, $t5, $t2
-	lw $t6, 0($t2)
+	lw $t6, 0($t2)          # $t6 = valor de reg[rs]
+
+	lui $t7, 0x1000         
+	subu $t6, $t6, $t7       # offset_base = reg[rs] - 0x10000000
 
 	la $t7, data_seg
 	addu $t6, $t7, $t6
-	addu $t6, $t6, $t4
-
-	sll $t3, $t3, 2
-	addu $t3, $t5, $t3
-	lw $t8, 0($t3)
-	sw $t8, 0($t6)
+	addu $t6, $t6, $t4       # Endereço final na memória simulada
+	
+	sw $t8, 0($t6)      
 	j exec_done
 
 exec_beq:
@@ -608,20 +982,56 @@ exec_beq:
 	la $t5, reg_file
 	sll $t2, $t2, 2
 	addu $t2, $t5, $t2
-	lw $t6, 0($t2)
+	lw $t6, 0($t2)          # reg[rs]
+	
 	sll $t3, $t3, 2
 	addu $t3, $t5, $t3
-	lw $t7, 0($t3)
-	bne $t6, $t7, exec_done
+	lw $t7, 0($t3)          # reg[rt]
+	
+	bne $t6, $t7, beq_nao_salta
 
+	# Se for igual, salta: PC = PC + (offset * 4)
 	la $t8, pc
 	lw $t9, 0($t8)
 	sll $t4, $t4, 2
 	addu $t9, $t9, $t4
 	sw $t9, 0($t8)
+
+beq_nao_salta:
 	li $v0, 4
 	la $a0, msg_fim_linha
 	syscall
+	j exec_done
+
+exec_bne:
+	la $t0, ir
+	lw $t1, 0($t0)
+	srl $t2, $t1, 21
+	andi $t2, $t2, 0x1F
+	srl $t3, $t1, 16
+	andi $t3, $t3, 0x1F
+	andi $t4, $t1, 0xFFFF
+	sll $t4, $t4, 16
+	sra $t4, $t4, 16
+
+	la $t5, reg_file
+	sll $t6, $t2, 2
+	addu $t6, $t5, $t6
+	lw $t7, 0($t6)          # reg[rs]
+
+	sll $t6, $t3, 2
+	addu $t6, $t5, $t6
+	lw $t8, 0($t6)          # reg[rt]
+
+	beq $t7, $t8, exec_done # Se forem iguais, não salta e sai
+
+	# Se for diferente, salta
+	la $t9, pc
+	lw $t0, 0($t9)
+	sll $t4, $t4, 2
+	addu $t0, $t0, $t4
+	sw $t0, 0($t9)
+
 	j exec_done
 
 exec_j:
@@ -630,12 +1040,20 @@ exec_j:
 	la $a0, msg_j
 	syscall
 
-	la $t0, ir
+	# J-type usa endereço absoluto com base 0x00400000
+	# Simplificado: pc = 0x00400000 | (address << 2)
+	# (assumindo que os 4 bits superiores do PC são sempre 0 para text)
+	la $t0, campo_addr
+	lw $t2, 0($t0)
+	sll $t2, $t2, 2          # address << 2
+
+	la $t0, pc
 	lw $t1, 0($t0)
-	andi $t2, $t1, 0x03FFFFFF
-	sll $t2, $t2, 2
-	la $t3, pc
-	sw $t2, 0($t3)
+	lui $t3, 0xF000          # máscara para bits 31-28
+	and $t1, $t1, $t3        # bits 31-28 do PC atual
+	or  $t2, $t1, $t2        # novo PC = (PC[31:28]) | (target)
+
+	sw $t2, 0($t0)
 
 	li $v0, 4
 	la $a0, msg_fim_linha
