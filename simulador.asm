@@ -13,7 +13,7 @@ stack_seg:     .space MEM_SIZE_BYTES
 reg_file:      .space 128
 
 # Registradores internos
-pc:            .word 0x00400000
+pc:            .word 0
 ir:            .word 0
 ciclos:        .word 0        # contador de ciclos
 text_size:     .word 0        # tamanho (em bytes) do arquivo carregado em text_seg
@@ -131,16 +131,12 @@ main_loop:
 	li $t2, 10000
 	bge $t1, $t2, exit_simulator
 
-	# Verificar limite usando offset relativo ao text_seg
-	# offset = PC - 0x00400000
+	# Verificar limite usando offset do PC
 	la $t0, pc
 	lw $t1, 0($t0)
-	lui $t2, 0x0040            # base text = 0x00400000
-	subu $t3, $t1, $t2         # offset = PC - 0x00400000
 	la $t4, text_size
 	lw $t5, 0($t4)
-	bge $t3, $t5, exit_simulator
-
+	bge $t1, $t5, exit_simulator
 
 	# Incrementar contador de ciclos
 	la $t0, ciclos
@@ -205,8 +201,8 @@ zerar_regs_loop:
 	addi $t2, $t2, 1
 	j zerar_regs_loop
 zerar_regs_done:
-	# PC = 0x00400000 (endereço absoluto do segmento de texto)
-	lui $t0, 0x0040
+	# PC = 0 (offset simples, não endereço absoluto)
+	li $t0, 0
 	la $t1, pc
 	sw $t0, 0($t1)
 
@@ -408,10 +404,9 @@ fetch:
 
 	la $t0, pc
 	lw $t1, 0($t0)
-	lui $t2, 0x0040
-	subu $t2, $t1, $t2          # offset relativo
+	# t1 é offset simples (0 a 4096)
 	la $t3, text_seg
-	addu $t3, $t3, $t2          # endereço real no MARS
+	addu $t3, $t3, $t1          # endereço real no MARS = text_seg + offset
 	lw $t4, 0($t3)
 	la $t5, ir
 	sw $t4, 0($t5)
@@ -893,14 +888,11 @@ exec_lw:
 	la $t5, reg_file
 	sll $t2, $t2, 2
 	addu $t2, $t5, $t2
-	lw $t6, 0($t2)          # $t6 = valor de reg[rs]
+	lw $t6, 0($t2)          # $t6 = valor de reg[rs] (offset em data_seg)
 
-	# Converter endereço absoluto MIPS para offset relativo ao nosso data_seg interno
-	lui $t7, 0x1000        
-	subu $t6, $t6, $t7     
-
+	# $t6 é offset simples, calcular endereço=data_seg+offset+imm
 	la $t7, data_seg
-	addu $t6, $t7, $t6       # Endereço real no MARS = data_seg + offset_base
+	addu $t6, $t7, $t6       # Endereço real no MARS = data_seg + offset
 	addu $t6, $t6, $t4       # Endereço final = Endereço real + Immediate (offset)
 	lw $t8, 0($t6)          # Lê a word da memória simulada
 
@@ -951,15 +943,13 @@ exec_sw:
 	# Calcular endereço de destino na memória
 	sll $t2, $t2, 2
 	addu $t2, $t5, $t2
-	lw $t6, 0($t2)          # $t6 = valor de reg[rs]
+	lw $t6, 0($t2)          # $t6 = valor de reg[rs] (offset em data_seg)
 
-	lui $t7, 0x1000         
-	subu $t6, $t6, $t7       # offset_base = reg[rs] - 0x10000000
-
+	# $t6 é offset simples, calcular endereço=data_seg+offset+imm
 	la $t7, data_seg
-	addu $t6, $t7, $t6
-	addu $t6, $t6, $t4       # Endereço final na memória simulada
-	
+	addu $t6, $t7, $t6       # Endereço real no MARS = data_seg + offset
+	addu $t6, $t6, $t4       # Endereço final na memória simulada = + immediate
+
 	sw $t8, 0($t6)      
 	j exec_done
 
@@ -1040,20 +1030,13 @@ exec_j:
 	la $a0, msg_j
 	syscall
 
-	# J-type usa endereço absoluto com base 0x00400000
-	# Simplificado: pc = 0x00400000 | (address << 2)
-	# (assumindo que os 4 bits superiores do PC são sempre 0 para text)
+	# J-type: novo PC = (address << 2)
 	la $t0, campo_addr
 	lw $t2, 0($t0)
 	sll $t2, $t2, 2          # address << 2
 
 	la $t0, pc
-	lw $t1, 0($t0)
-	lui $t3, 0xF000          # máscara para bits 31-28
-	and $t1, $t1, $t3        # bits 31-28 do PC atual
-	or  $t2, $t1, $t2        # novo PC = (PC[31:28]) | (target)
-
-	sw $t2, 0($t0)
+	sw $t2, 0($t0)           # novo PC = target
 
 	li $v0, 4
 	la $a0, msg_fim_linha
