@@ -225,6 +225,181 @@ $14 = $t6    (temporário)        $30 = $fp    (frame pointer)
 $15 = $t7    (temporário)        $31 = $ra    (return address)
 ```
 
+## Dificuldades Encontradas e Soluções
+
+### 1. **Sistema de Endereçamento do PC**
+
+#### Problema
+Inicialmente, o PC foi implementado como **endereço absoluto MIPS** (0x00400000), o que causava:
+- Conversões complexas com `lui 0x0040` e `subu` para calcular offsets
+- Tentativas de acesso ao kernel text segment do MARS (erro: "DEVELOPER: You must use setStatement()")
+- Corrupção de memória ao acessar endereços inválidos
+
+Exemplo do erro:
+```
+Runtime exception at 0x00400ae8: DEVELOPER: You must use setStatement() 
+to write to kernel text segment!0x8000fffc
+```
+
+#### Solução Implementada
+Mudar para **offsets simples** (0 a 4096):
+```asm
+# Antes (errado):
+lui $t2, 0x0040           # base = 0x00400000
+subu $t2, $t1, $t2        # offset = PC - 0x00400000
+
+# Depois (correto):
+la $t3, text_seg
+addu $t3, $t3, $t1        # endereço = text_seg + PC (offset simples)
+```
+
+**Benefícios:**
+- ✅ Sem conversões complexas
+- ✅ Sem erros de acesso a kernel memory
+- ✅ Código mais legível e maintível
+- ✅ Performance melhorada
+
+---
+
+### 2. **Testes com Programa Vazio**
+
+#### Problema
+Programa carregava mas não executava nada:
+```
+=== SIMULADOR MIPS INICIADO ===
+Tamanho do arquivo: 0 bytes
+=== FIM DO ARQUIVO ===
+```
+
+Causas identificadas:
+1. **Arquivos não encontrados**: Estavam em `arquivos de entrada/`, mas MARS procurava na pasta raiz
+2. **Primeiro arquivo sobrescrevia o segundo**: Flag `primeiro_arquivo` não impedia sobrescrita do `text_size`
+3. **Instruções sobrecarregadas**: Teste inicial tinha 8 instruções pré-compiladas em `test_prog`
+
+#### Solução Implementada
+
+**1. Sistema de Carregamento Melhorado:**
+```asm
+primeiro_arquivo: .word 1     # flag para controlar qual arquivo está sendo carregado
+
+# No carregamento:
+la $t1, primeiro_arquivo
+lw $t2, 0($t1)
+beqz $t2, carregar_sem_salvar  # Se segundo arquivo, não sobrescreve text_size
+
+la $t1, text_size
+sw $t0, 0($t1)                 # Só salva tamanho na primeira carga
+la $t1, primeiro_arquivo
+sw $zero, 0($t1)               # Marca como processado
+```
+
+**2. Instruções de Debug Adicionadas:**
+```
+Carregando arquivo TEXT (instruções)...
+Arquivo TEXT carregado
+Carregando arquivo DATA (dados)...
+Arquivo DATA carregado
+Tamanho do arquivo: XXX bytes
+```
+
+**3. Documentação Clara:**
+- Explicar que arquivos devem estar na **pasta raiz**, não em subpasta
+- Adicionar seção de troubleshooting
+
+---
+
+### 3. **Limite de Ciclos vs Fim de Arquivo**
+
+#### Problema
+Inicialmente, o programa rodava sempre até 10.000 ciclos:
+```asm
+la $t0, ciclos
+lw $t1, 0($t0)
+li $t2, 10000
+bge $t1, $t2, exit_simulator   # Única condição
+```
+
+Isso causava:
+- ❌ Execução desnecessária após fim do programa
+- ❌ Registradores sendo alterados depois que deveriam estar congelados
+- ❌ Output confuso com muitos ciclos vazios
+- ❌ Difícil distinguir se programa terminou corretamente
+
+#### Solução Implementada
+
+**Sistema de Dupla Condição:**
+```asm
+main_loop:
+  # Verificar limite de ciclos (proteção contra loops infinitos)
+  la $t0, ciclos
+  lw $t1, 0($t0)
+  li $t2, 10000
+  bge $t1, $t2, exit_simulator
+
+  # Verificar limite do arquivo (NOVA VERIFICAÇÃO)
+  la $t0, pc
+  lw $t1, 0($t0)              # PC atual
+  la $t4, text_size
+  lw $t5, 0($t4)              # Tamanho total
+  bge $t1, $t5, exit_simulator # Se PC >= tamanho, parar
+  
+  # Continua execução...
+```
+
+**Checkpoint de Progresso:**
+```
+--- CICLO 1 | PC: 0x00000000 | IR: 0x27bdfffc
+--- CICLO 2 | PC: 0x00000004 | IR: 0x3c011001
+...
+--- CICLO N | PC: 0xXXXXXXXX | IR: 0x[próxima instrução]
+=== FIM DO ARQUIVO ===
+```
+
+**Benefícios:**
+- ✅ Programa termina no momento correto
+- ✅ Fácil identificar quantas instruções foram executadas
+- ✅ Proteção contra loops infinitos (10k ciclos ainda vale)
+- ✅ Saída limpa e compreensível
+
+---
+
+### 4. **Desafios Adicionais Resolvidos**
+
+#### 4.1 Campos de Instrução
+**Problema**: Precisava extrair múltiplos campos (opcode, rs, rt, rd, shamt, funct, imm, addr)
+
+**Solução**: Variáveis globais para cache:
+```asm
+campo_opcode: .word 0
+campo_rs: .word 0
+campo_rt: .word 0
+campo_rd: .word 0
+campo_shamt: .word 0
+campo_funct: .word 0
+campo_imm: .word 0
+campo_addr: .word 0
+```
+
+#### 4.2 Proteção de $zero
+**Problema**: Instruções poderiam escrever em $0, violando contrato MIPS
+
+**Solução**: Verificação antes de cada escrita:
+```asm
+beqz $t4, exec_done   # Se rd == 0, não escreve (protege $zero)
+```
+
+#### 4.3 Extensão de Sinal no Immediate
+**Problema**: Valores imediatos de 16 bits precisam ser estendidos com sinal para 32 bits
+
+**Solução**: Operação de extensão com sinal:
+```asm
+andi $t4, $t1, 0xFFFF      # Extrai bits 15-0
+sll $t4, $t4, 16           # Shift para esquerda
+sra $t4, $t4, 16           # Shift aritmético (estende sinal)
+```
+
+---
+
 ## Limitações e Extensões Futuras
 
 ### Limitações Atuais
